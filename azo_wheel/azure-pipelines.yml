@@ -1,0 +1,132 @@
+# Azure DevOps CI/CD for azo_wheel
+#
+# CI: runs on every PR and push to main — lints, builds, tests.
+# Release: manually triggered — bumps version, builds wheel, uploads to UC volume, tags commit.
+
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - azo_wheel/**
+
+pr:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - azo_wheel/**
+
+variables:
+  pythonVersion: "3.11"
+  workingDirectory: azo_wheel
+  # Set these in your ADO pipeline variables (mark DATABRICKS_TOKEN as secret):
+  #   DATABRICKS_HOST: https://e2-demo-field-eng.cloud.databricks.com
+  #   DATABRICKS_TOKEN: <your-PAT-or-service-principal-token>
+  ucVolumePath: /Volumes/users/sol_ackerman/wheels
+
+stages:
+  # ──────────────────────────────────────────────
+  # CI Stage — runs on every PR / push to main
+  # ──────────────────────────────────────────────
+  - stage: CI
+    displayName: "CI: Lint, Build, Test"
+    jobs:
+      - job: BuildAndTest
+        pool:
+          vmImage: windows-latest
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: $(pythonVersion)
+
+          - pwsh: pip install uv
+            displayName: Install uv
+
+          - pwsh: uv sync --dev
+            displayName: Install dependencies
+            workingDirectory: $(workingDirectory)
+
+          - pwsh: |
+              uv run black --check src\ tests\
+            displayName: Lint (black)
+            workingDirectory: $(workingDirectory)
+
+          - pwsh: uv build --wheel
+            displayName: Build wheel
+            workingDirectory: $(workingDirectory)
+
+          - pwsh: uv run pytest --junitxml=test-results.xml
+            displayName: Run tests
+            workingDirectory: $(workingDirectory)
+            env:
+              DATABRICKS_HOST: $(DATABRICKS_HOST)
+              DATABRICKS_TOKEN: $(DATABRICKS_TOKEN)
+
+          - task: PublishTestResults@2
+            condition: succeededOrFailed()
+            inputs:
+              testResultsFormat: JUnit
+              testResultsFiles: $(workingDirectory)\test-results.xml
+
+  # ──────────────────────────────────────────────
+  # Release Stage — manually triggered
+  # ──────────────────────────────────────────────
+  - stage: Release
+    displayName: "Release: Bump, Build, Publish"
+    dependsOn: CI
+    condition: and(succeeded(), eq(variables['Build.Reason'], 'Manual'))
+    jobs:
+      - job: PublishWheel
+        pool:
+          vmImage: windows-latest
+        steps:
+          - checkout: self
+            persistCredentials: "true"
+
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: $(pythonVersion)
+
+          - pwsh: pip install uv databricks-cli
+            displayName: Install tools
+
+          # BUMP_PART should be set as a pipeline variable when queuing manually.
+          # Valid values: major, minor, patch (defaults to patch).
+          - pwsh: |
+              $BumpPart = if ($env:BUMP_PART) { $env:BUMP_PART } else { "patch" }
+              $NewVersion = python scripts\bump_version.py $BumpPart
+              Write-Host "##vso[task.setvariable variable=NEW_VERSION]$NewVersion"
+              Write-Host "Bumped to $NewVersion"
+            displayName: Bump version
+            workingDirectory: $(workingDirectory)
+
+          - pwsh: |
+              uv sync --dev
+              uv build --wheel
+            displayName: Build wheel
+            workingDirectory: $(workingDirectory)
+
+          - pwsh: |
+              $Wheel = Get-ChildItem dist\*.whl | Select-Object -First 1
+              $WheelName = $Wheel.Name
+              Write-Host "Uploading $WheelName to $(ucVolumePath)/"
+              databricks fs cp $Wheel.FullName "$(ucVolumePath)/$WheelName" --overwrite
+              Write-Host "Upload complete"
+            displayName: Upload wheel to UC volume
+            workingDirectory: $(workingDirectory)
+            env:
+              DATABRICKS_HOST: $(DATABRICKS_HOST)
+              DATABRICKS_TOKEN: $(DATABRICKS_TOKEN)
+
+          - pwsh: |
+              git config user.email "azure-pipelines@dev.azure.com"
+              git config user.name "Azure Pipelines"
+              git add pyproject.toml
+              git commit -m "release: v$(NEW_VERSION)"
+              git tag "v$(NEW_VERSION)"
+              git push origin HEAD:main --tags
+            displayName: Commit and tag release
+            workingDirectory: $(workingDirectory)
