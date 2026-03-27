@@ -28,6 +28,9 @@ variables:
   ucVolumePath: /Volumes/users/sol_ackerman/wheels
   # Azure Artifacts feed name — must match the feed you created in Artifacts
   artifactsFeed: azo-python-feed
+  # Notebook test runner settings
+  notebookPath: /Repos/sol.ackerman@databricks.com/osc/azo_wheel/notebooks/run_tests
+  junitVolumePath: /Volumes/users/sol_ackerman/wheels/test-results
 
 stages:
   # ──────────────────────────────────────────────
@@ -74,11 +77,127 @@ stages:
               testResultsFiles: $(workingDirectory)\test-results.xml
 
   # ──────────────────────────────────────────────
+  # Notebook Test Stage — runs tests on Databricks
+  # ──────────────────────────────────────────────
+  - stage: NotebookTest
+    displayName: "Test: Run via Databricks Notebook"
+    dependsOn: CI
+    condition: succeeded()
+    jobs:
+      - job: RunNotebookTests
+        pool:
+          vmImage: windows-latest
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: $(pythonVersion)
+
+          - pwsh: pip install databricks-cli
+            displayName: Install Databricks CLI
+
+          # Run the notebook with the junit_volume_path parameter.
+          # The Databricks Repos notebook runs pytest and writes JUnit XML to the volume.
+          - pwsh: |
+              databricks jobs create --json '{
+                "name": "ci-notebook-test-$(Build.BuildId)",
+                "tasks": [{
+                  "task_key": "run_tests",
+                  "notebook_task": {
+                    "notebook_path": "$(notebookPath)",
+                    "base_parameters": {
+                      "junit_volume_path": "$(junitVolumePath)"
+                    },
+                    "source": "WORKSPACE"
+                  },
+                  "environment_key": "Default"
+                }]
+              }' > job_response.json
+              $JobId = (Get-Content job_response.json | ConvertFrom-Json).job_id
+              Write-Host "Created job $JobId"
+              Write-Host "##vso[task.setvariable variable=JOB_ID]$JobId"
+
+              # Trigger the run
+              databricks jobs run-now --job-id $JobId > run_response.json
+              $RunId = (Get-Content run_response.json | ConvertFrom-Json).run_id
+              Write-Host "Started run $RunId"
+              Write-Host "##vso[task.setvariable variable=RUN_ID]$RunId"
+            displayName: Launch notebook test run
+            env:
+              DATABRICKS_HOST: $(DATABRICKS_HOST)
+              DATABRICKS_TOKEN: $(DATABRICKS_TOKEN)
+
+          # Poll until the run completes
+          - pwsh: |
+              $RunId = "$(RUN_ID)"
+              Write-Host "Waiting for run $RunId to complete..."
+              while ($true) {
+                $status = databricks runs get --run-id $RunId | ConvertFrom-Json
+                $state = $status.state.life_cycle_state
+                $result = $status.state.result_state
+                Write-Host "  State: $state / $result"
+                if ($state -eq "TERMINATED" -or $state -eq "SKIPPED" -or $state -eq "INTERNAL_ERROR") {
+                  if ($result -ne "SUCCESS") {
+                    Write-Host "##vso[task.logissue type=error]Notebook run failed with result: $result"
+                    Write-Host "##vso[task.setvariable variable=NOTEBOOK_PASSED]false"
+                  } else {
+                    Write-Host "##vso[task.setvariable variable=NOTEBOOK_PASSED]true"
+                  }
+                  break
+                }
+                Start-Sleep -Seconds 30
+              }
+            displayName: Wait for notebook completion
+            env:
+              DATABRICKS_HOST: $(DATABRICKS_HOST)
+              DATABRICKS_TOKEN: $(DATABRICKS_TOKEN)
+
+          # Download JUnit XML from UC volume
+          - pwsh: |
+              New-Item -ItemType Directory -Force -Path test-results | Out-Null
+              databricks fs cp "$(junitVolumePath)/test-results.xml" test-results/test-results.xml
+              Write-Host "Downloaded test results"
+            displayName: Download test results from volume
+            condition: succeededOrFailed()
+            env:
+              DATABRICKS_HOST: $(DATABRICKS_HOST)
+              DATABRICKS_TOKEN: $(DATABRICKS_TOKEN)
+
+          # Publish results to Azure Pipelines
+          - task: PublishTestResults@2
+            displayName: Publish notebook test results
+            condition: succeededOrFailed()
+            inputs:
+              testResultsFormat: JUnit
+              testResultsFiles: test-results/test-results.xml
+              testRunTitle: "Notebook Tests (Databricks)"
+
+          # Clean up the one-off job
+          - pwsh: |
+              databricks jobs delete --job-id $(JOB_ID)
+              Write-Host "Cleaned up job $(JOB_ID)"
+            displayName: Cleanup CI job
+            condition: always()
+            env:
+              DATABRICKS_HOST: $(DATABRICKS_HOST)
+              DATABRICKS_TOKEN: $(DATABRICKS_TOKEN)
+
+          # Fail the stage if the notebook run failed
+          - pwsh: |
+              if ("$(NOTEBOOK_PASSED)" -ne "true") {
+                Write-Error "Notebook test run did not succeed"
+                exit 1
+              }
+            displayName: Check notebook result
+            condition: succeededOrFailed()
+
+  # ──────────────────────────────────────────────
   # Release Stage — manually triggered
   # ──────────────────────────────────────────────
   - stage: Release
     displayName: "Release: Bump, Build, Publish"
-    dependsOn: CI
+    dependsOn:
+      - CI
+      - NotebookTest
     condition: and(succeeded(), eq(variables['Build.Reason'], 'Manual'))
     jobs:
       - job: PublishWheel

@@ -4,6 +4,10 @@
 # MAGIC
 # MAGIC Run the full pytest suite from the Databricks workspace.
 # MAGIC Click **Run All** or attach to any cluster/serverless and execute each cell.
+# MAGIC
+# MAGIC ## CI mode
+# MAGIC Set the `junit_volume_path` widget to a UC volume path (e.g. `/Volumes/users/sol_ackerman/wheels`)
+# MAGIC to write JUnit XML results there. Azure Pipelines can then download and publish them.
 
 # COMMAND ----------
 
@@ -12,7 +16,7 @@
 
 # COMMAND ----------
 
-import subprocess, sys, os
+import sys, os
 
 # Prevent __pycache__ directories from being written into the Repos checkout
 sys.dont_write_bytecode = True
@@ -44,17 +48,48 @@ if src_dir not in sys.path:
 
 # COMMAND ----------
 
+# Widget for CI integration — set via notebook task parameters or the widget UI.
+# When empty, no JUnit XML is written (interactive mode).
+try:
+    dbutils.widgets.text("junit_volume_path", "", "JUnit output volume path")  # noqa: F821
+    junit_volume_path = dbutils.widgets.get("junit_volume_path").strip()  # noqa: F821
+except Exception:
+    junit_volume_path = ""
+
+# COMMAND ----------
+
 import pytest
 
-# Run pytest programmatically so results render in cell output.
-# -v for verbose, --tb=short for concise tracebacks, --no-header to reduce noise.
-exit_code = pytest.main([
+# Build pytest args
+pytest_args = [
     test_dir,
     "-v",
     "--tb=short",
     "--no-header",
     "-p", "no:cacheprovider",
-])
+]
+
+# If a volume path is provided, write JUnit XML to a local temp file first,
+# then copy it to the volume so the CI agent can retrieve it.
+junit_local_path = None
+if junit_volume_path:
+    junit_local_path = "/tmp/test-results.xml"
+    pytest_args.extend(["--junitxml", junit_local_path])
+    print(f"JUnit XML will be written to: {junit_volume_path}/test-results.xml")
+
+# Run pytest programmatically so results render in cell output.
+exit_code = pytest.main(pytest_args)
+
+# COMMAND ----------
+
+# Copy JUnit XML to the UC volume (if CI mode is active)
+if junit_local_path and os.path.exists(junit_local_path):
+    dest = f"{junit_volume_path}/test-results.xml"
+    # UC volumes are FUSE-mounted at /Volumes/... so a simple file copy works
+    import shutil
+    os.makedirs(junit_volume_path, exist_ok=True)
+    shutil.copy2(junit_local_path, dest)
+    print(f"JUnit XML copied to {dest}")
 
 # COMMAND ----------
 
