@@ -1,0 +1,27 @@
+# Job that runs the pytest suite from the notebook.
+# Triggered by CI — not scheduled.
+
+resources:
+  jobs:
+    test_job:
+      name: azo_wheel_test_runner
+
+      parameters:
+        - name: junit_volume_path
+          default: ""
+
+      tasks:
+        - task_key: run_tests
+          notebook_task:
+            notebook_path: ../notebooks/run_tests.py
+            base_parameters:
+              junit_volume_path: ${job.parameters.junit_volume_path}
+            source: WORKSPACE
+          environment_key: default
+
+      environments:
+        - environment_key: default
+          spec:
+            environment_version: "4"
+            dependencies:
+              - ../dist/*.whl
