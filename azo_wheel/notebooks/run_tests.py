@@ -7,12 +7,15 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install pytest -q
+# MAGIC %pip install pytest pyyaml -q
 # dbutils.library.restartPython()  # uncomment if you hit import issues after install
 
 # COMMAND ----------
 
 import subprocess, sys, os
+
+# Prevent __pycache__ directories from being written into the Repos checkout
+sys.dont_write_bytecode = True
 
 # Point pytest at the tests directory relative to the repo root.
 # When this notebook is in the workspace via Repos, the repo root is two levels up.
@@ -50,6 +53,7 @@ exit_code = pytest.main([
     "-v",
     "--tb=short",
     "--no-header",
+    "-p", "no:cacheprovider",
 ])
 
 # COMMAND ----------

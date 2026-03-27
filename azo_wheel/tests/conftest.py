@@ -16,6 +16,7 @@ try:
     import json
     import csv
     import os
+    import yaml
 except ImportError:
     raise ImportError(
         "Test dependencies not found.\n\nRun tests using 'uv run pytest'. See http://docs.astral.sh/uv to learn more about uv."
@@ -63,7 +64,7 @@ def load_fixture(spark: SparkSession):
 def _enable_fallback_compute():
     """Enable serverless compute if no compute is specified."""
     conf = WorkspaceClient().config
-    if conf.serverless_compute_id or conf.cluster_id or os.environ.get("SPARK_REMOTE"):
+    if getattr(conf, "serverless_compute_id", None) or getattr(conf, "cluster_id", None) or os.environ.get("SPARK_REMOTE"):
         return
 
     url = "https://docs.databricks.com/dev-tools/databricks-connect/cluster-config"
