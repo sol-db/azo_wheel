@@ -118,14 +118,58 @@ pip install azo_wheel \
   --extra-index-url https://{PAT}@pkgs.dev.azure.com/{ORG}/{PROJECT}/_packaging/azo-python-feed/pypi/simple/
 ```
 
-### Option C: Databricks Notebooks / Jobs
+### Option C: Databricks — Workspace-wide default repo (recommended for serverless)
 
-```python
-%pip install azo_wheel \
-  --extra-index-url https://{PAT}@pkgs.dev.azure.com/{ORG}/{PROJECT}/_packaging/azo-python-feed/pypi/simple/
+This makes your Azure Artifacts feed the default pip index for **all serverless notebooks and jobs** in the workspace, so users can just do `%pip install azo_wheel`.
+
+#### 1. Create a PAT for the feed
+
+In Azure DevOps, create a **Personal Access Token** with at least **Packaging: Read** scope.
+
+#### 2. Configure the workspace default Python package repository
+
+Databricks uses a predefined secret scope `databricks-package-management` with specific keys to hold the default pip index URL.
+
+```bash
+# Create the secret scope (once per workspace)
+databricks secrets create-scope databricks-package-management
+databricks secrets put-acl databricks-package-management admins MANAGE
+databricks secrets put-acl databricks-package-management users READ
 ```
 
-For cluster-wide access, add the `--extra-index-url` to a **cluster init script** or set the `PIP_EXTRA_INDEX_URL` environment variable in the cluster configuration.
+Store the Azure Artifacts index URL (with PAT embedded) as the pip index-url secret:
+
+```bash
+databricks secrets put-secret --json '{
+  "scope": "databricks-package-management",
+  "key": "pip-index-url",
+  "string_value": "https://<PAT>@pkgs.dev.azure.com/<ORG>/<PROJECT>/_packaging/azo-python-feed/pypi/simple/"
+}'
+```
+
+(Optional) To also fall back to public PyPI:
+
+```bash
+databricks secrets put-secret --json '{
+  "scope": "databricks-package-management",
+  "key": "pip-extra-index-urls",
+  "string_value": "https://pypi.org/simple/"
+}'
+```
+
+#### 3. Use it
+
+Databricks automatically picks this up. In any serverless notebook or job:
+
+```python
+%pip install azo_wheel==1.2.3
+```
+
+No extra index URL or token needed — it just works.
+
+#### 4. Ensure networking allows Azure Artifacts
+
+If you use **serverless network policies / egress control**, add `pkgs.dev.azure.com` to the allowed destinations.
 
 ### Option D: uv (if using uv locally)
 

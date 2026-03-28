@@ -168,19 +168,24 @@ stages:
             displayName: Bump version
             workingDirectory: $(workingDirectory)
 
+          # Deploy builds the wheel and uploads it to the UC volume
           - pwsh: |
-              uv sync --dev
-              uv build --wheel
-            displayName: Build wheel
+              databricks bundle deploy --target prod
+            displayName: Bundle deploy (build + upload to volume)
             workingDirectory: $(workingDirectory)
+            env:
+              DATABRICKS_HOST: $(DATABRICKS_HOST)
+              DATABRICKS_TOKEN: $(DATABRICKS_TOKEN)
 
+          # Download the wheel from the volume to publish to Azure Artifacts
           - pwsh: |
+              New-Item -ItemType Directory -Force -Path dist | Out-Null
+              databricks fs cp "$(ucVolumePath)/" dist/ --recursive --overwrite
+              # Keep only the .whl files
+              Get-ChildItem dist\* -Exclude *.whl | Remove-Item -Force
               $Wheel = Get-ChildItem dist\*.whl | Select-Object -First 1
-              $WheelName = $Wheel.Name
-              Write-Host "Uploading $WheelName to $(ucVolumePath)/"
-              databricks fs cp $Wheel.FullName "$(ucVolumePath)/$WheelName" --overwrite
-              Write-Host "Upload complete"
-            displayName: Upload wheel to UC volume
+              Write-Host "Downloaded $($Wheel.Name)"
+            displayName: Download wheel from volume
             workingDirectory: $(workingDirectory)
             env:
               DATABRICKS_HOST: $(DATABRICKS_HOST)
